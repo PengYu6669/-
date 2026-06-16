@@ -31,7 +31,11 @@ export async function GET(
       },
     });
   } catch (err: any) {
-    console.error("❌ files API TOS:", file.storedPath, err?.message || err);
-    return NextResponse.json({ error: `获取文件失败: ${err?.message || err}` }, { status: 500 });
+    const detail = err?.message || err?.code || String(err);
+    console.error("❌ files API TOS:", file.storedPath, "原因:", detail, err?.stack?.split("\n")[0]);
+    return NextResponse.json({
+      error: `获取文件失败: ${detail}`,
+      storedPath: file.storedPath,
+    }, { status: 500 });
   }
 }
