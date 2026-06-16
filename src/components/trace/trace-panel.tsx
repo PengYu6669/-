@@ -4,7 +4,8 @@ import { useEffect, useState } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Loader2, Image as ImageIcon, FileText, Clock, Maximize2, X } from "lucide-react";
+import { Loader2, Image as ImageIcon, FileText, Clock } from "lucide-react";
+import { ImageViewer } from "./image-viewer";
 
 interface TraceData {
   recordType?: string;
@@ -30,14 +31,12 @@ export function TracePanel({ type, recordId, open, onClose, highlightField, cell
   const [loading, setLoading] = useState(false);
   const [fileId, setFileId] = useState<string | null>(null);
   const [imgError, setImgError] = useState(false);
-  const [imgZoom, setImgZoom] = useState(false);
 
   useEffect(() => {
     if (!recordId || !open) {
       setData(null);
       setFileId(null);
       setImgError(false);
-      setImgZoom(false);
       return;
     }
 
@@ -124,21 +123,12 @@ export function TracePanel({ type, recordId, open, onClose, highlightField, cell
                   title="PDF 预览"
                 />
               ) : isImage && !imgError ? (
-                <div className="space-y-2">
-                  <div className="relative group cursor-pointer" onClick={() => setImgZoom(true)}>
-                    <img
-                      src={`/api/files/${fileId}`}
-                      alt="原始文件"
-                      className="w-full rounded-lg border hover:ring-2 hover:ring-primary/30 transition-all"
-                      onError={() => setImgError(true)}
-                      style={{ maxHeight: "55vh", objectFit: "contain" }}
-                    />
-                    <div className="absolute top-2 right-2 bg-black/60 text-white rounded-md p-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <Maximize2 className="w-4 h-4" />
-                    </div>
-                  </div>
-                  <p className="text-xs text-muted-foreground text-center">💡 点击图片可放大查看</p>
-                </div>
+                <ImageViewer
+                  src={`/api/files/${fileId}`}
+                  alt="原始文件"
+                  className="rounded-lg border relative"
+                  maxHeight="60vh"
+                />
               ) : imgError ? (
                 <div className="text-center py-12 text-muted-foreground text-sm">
                   <ImageIcon className="w-10 h-10 mx-auto mb-2 opacity-30" />
@@ -201,15 +191,6 @@ export function TracePanel({ type, recordId, open, onClose, highlightField, cell
         <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">无数据</div>
       )}
 
-      {/* 图片全屏放大 */}
-      {imgZoom && fileId && (
-        <div className="fixed inset-0 z-[10000] bg-black/90 flex items-center justify-center p-4" onClick={() => setImgZoom(false)}>
-          <button className="absolute top-4 right-4 text-white/80 hover:text-white p-2 rounded-full hover:bg-white/10" onClick={() => setImgZoom(false)}>
-            <X className="w-6 h-6" />
-          </button>
-          <img src={`/api/files/${fileId}`} alt="放大" className="max-w-full max-h-full object-contain rounded-lg" onClick={(e) => e.stopPropagation()} />
-        </div>
-      )}
     </div>
   );
 }
