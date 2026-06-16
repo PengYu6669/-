@@ -35,6 +35,11 @@ export function ExcelPreview({ projectId }: Props) {
   const [data, setData] = useState<PreviewData | null>(null);
   const [loading, setLoading] = useState(false);
 
+  // Inline editing
+  const [editingCell, setEditingCell] = useState<{ row: number; col: number } | null>(null);
+  const [editValue, setEditValue] = useState("");
+  const [saving, setSaving] = useState(false);
+
   // Trace panel
   const [traceOpen, setTraceOpen] = useState(false);
   const [traceType, setTraceType] = useState<"invoice" | "receipt">("invoice");
@@ -125,6 +130,48 @@ export function ExcelPreview({ projectId }: Props) {
     setTraceId(cell.traceSource.id);
     setTraceField(cell.traceSource.field);
     setTraceOpen(true);
+  };
+
+  const handleDoubleClick = (rowIdx: number, colIdx: number) => {
+    if (!data) return;
+    const cell = data.rows[rowIdx]?.cells[colIdx];
+    if (!cell?.traceSource || cell.traceSource.type === "static") return;
+    setEditingCell({ row: rowIdx, col: colIdx });
+    setEditValue(fmtVal(cell.value));
+  };
+
+  const handleSaveEdit = async () => {
+    if (!data || !editingCell) return;
+    const cell = data.rows[editingCell.row]?.cells[editingCell.col];
+    if (!cell?.traceSource) return;
+
+    const ts = cell.traceSource;
+    const fieldName = ts.field.replace(/^(invoice|receipt)\./, "");
+    const body: Record<string, unknown> = { [fieldName]: editValue || null };
+
+    // 数字字段转换
+    if (["amountExclTax", "taxAmount", "amountInclTax"].includes(fieldName)) {
+      body[fieldName] = parseFloat(editValue) || null;
+    }
+
+    setSaving(true);
+    try {
+      const url = `/api/${ts.type}s/${ts.id}`;
+      const res = await fetch(url, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      if (!res.ok) throw new Error("保存失败");
+      toast.success(`${data.headers[editingCell.col]} 已更新`);
+      setEditingCell(null);
+      fetchData(); // 刷新数据
+    } catch {
+      toast.error("保存失败");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") handleSaveEdit();
+    if (e.key === "Escape") setEditingCell(null);
   };
 
   // Inline format value
@@ -266,19 +313,32 @@ export function ExcelPreview({ projectId }: Props) {
                                   : ""
                               }`}
                               onClick={() => handleCellClick(ri, ci)}
+                              onDoubleClick={() => handleDoubleClick(ri, ci)}
                               title={
                                 (cell.traceSource && cell.traceSource.type !== "static"
-                                  ? `📌 来源: ${cell.traceSource.fileName}\n字段: ${cell.traceSource.field}\n🔍 点击查看溯源`
+                                  ? `📌 来源: ${cell.traceSource.fileName}\n字段: ${cell.traceSource.field}\n🔍 点击查看溯源\n💡 双击编辑`
                                   : "") +
                                 (lowConfidence
                                   ? `\n\n⚠️ 识别可信度低 (${Math.round(cell.confidence! * 100)}%)，请人工核对`
                                   : "")
                               }
                             >
-                              <span className="flex items-center gap-1">
-                                {lowConfidence && <span className="text-amber-600 text-xs">⚠️</span>}
-                                {fmtVal(cell.value)}
-                              </span>
+                              {editingCell?.row === ri && editingCell?.col === ci ? (
+                                <input
+                                  className="w-full px-1 py-0 text-xs border border-blue-400 rounded bg-white dark:bg-neutral-800 outline-none focus:ring-1 focus:ring-blue-400"
+                                  value={editValue}
+                                  onChange={(e) => setEditValue(e.target.value)}
+                                  onBlur={handleSaveEdit}
+                                  onKeyDown={handleKeyDown}
+                                  autoFocus
+                                  disabled={saving}
+                                />
+                              ) : (
+                                <span className="flex items-center gap-1">
+                                  {lowConfidence && <span className="text-amber-600 text-xs">⚠️</span>}
+                                  {fmtVal(cell.value)}
+                                </span>
+                              )}
                             </td>
                           );
                         })}
@@ -295,7 +355,7 @@ export function ExcelPreview({ projectId }: Props) {
 
       {/* 内联溯源面板 — 推开表格共享宽度，无遮罩无模糊 */}
       {traceOpen && (
-        <div className="w-[420px] shrink-0 rounded-lg border bg-card overflow-hidden" style={{ maxHeight: "calc(100vh - 200px)" }}>
+        <div className="w-[580px] shrink-0 rounded-lg border bg-card overflow-hidden" style={{ maxHeight: "calc(100vh - 180px)" }}>
           <TracePanel
             type={traceType}
             recordId={traceId}

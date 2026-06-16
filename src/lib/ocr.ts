@@ -110,9 +110,10 @@ export async function recognizeGeneral(
   }
 
   const wordsResult: WordResult[] = (data.words_result || []).map(
-    (w: { words: string; location?: WordLocation }) => ({
+    (w: { words: string; location?: WordLocation; probability?: { average?: number } }) => ({
       words: w.words,
       location: w.location || { left: 0, top: 0, width: 0, height: 0 },
+      probability: w.probability?.average,
     })
   );
 
@@ -150,9 +151,10 @@ export async function recognizeAccurateBasic(
   }
 
   const wordsResult: WordResult[] = (data.words_result || []).map(
-    (w: { words: string; location?: WordLocation }) => ({
+    (w: { words: string; location?: WordLocation; probability?: { average?: number } }) => ({
       words: w.words,
       location: w.location || { left: 0, top: 0, width: 0, height: 0 },
+      probability: w.probability?.average,
     })
   );
 
@@ -187,12 +189,17 @@ export function extractReceiptFieldsFromWords(
   const allWords = wordsResult.map((w) => w.words);
   const allText = allWords.join("\n");
 
-  /** 计算置信度 0-1 */
+  // 整张图 OCR 平均置信度（百度 accurate_basic 词条级 probability）
+  const ocrProbs = wordsResult.map((w) => w.probability).filter((p): p is number => p != null);
+  const avgOcrProb = ocrProbs.length > 0
+    ? ocrProbs.reduce((a, b) => a + b, 0) / ocrProbs.length
+    : 0.9; // 没有 probability 数据时默认 0.9
+
+  /** 计算字段置信度 = 匹配方式系数 × OCR 词条质量系数 */
   function score(mt: MatchType, val: unknown): number {
     if (mt === "none" || val == null) return 0;
-    if (mt === "exact") return 0.95;
-    if (mt === "fuzzy") return 0.65;
-    return 0.35;
+    const base = mt === "exact" ? 0.95 : mt === "fuzzy" ? 0.60 : 0.30;
+    return Math.round(base * avgOcrProb * 100) / 100;
   }
 
   type MatchType = "exact" | "fuzzy" | "fallback" | "none";
@@ -339,6 +346,7 @@ export interface WordLocation {
 export interface WordResult {
   words: string;
   location: WordLocation;
+  probability?: number; // 百度 OCR 词条平均置信度
 }
 
 export interface GeneralOcrResult {

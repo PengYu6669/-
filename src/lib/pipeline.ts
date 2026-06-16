@@ -24,6 +24,22 @@ function sanitizeJson(obj: unknown): any {
   }
 }
 
+/** 限制并发数执行异步任务 */
+async function runWithConcurrency<T>(
+  items: T[],
+  fn: (item: T) => Promise<unknown>,
+  concurrency: number
+): Promise<void> {
+  const queue = [...items];
+  async function worker() {
+    while (queue.length > 0) {
+      const item = queue.shift()!;
+      try { await fn(item); } catch { /* skip failed */ }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()));
+}
+
 /** 解析中文日期格式 "2021年06月25日" → Date */
 function parseChineseDate(str: string): Date | null {
   const match = str.match(/(\d{4})年(\d{1,2})月(\d{1,2})日/);
@@ -247,10 +263,34 @@ export async function autoMatch(projectId: string) {
 
   const links = [];
 
+  /**
+   * 从发票备注中提取候选编号
+   * 取分号分隔的纯数字 5-15 位 + 字母数字组合 6-20 位（排除银行账号、金额）
+   */
+  function extractCandidateCodes(invoice: (typeof invoices)[number]): string[] {
+    const remarks: string = (invoice.rawOcrJson as any)?.Remarks || "";
+    if (!remarks) return [];
+    const codes: string[] = [];
+    // 按分号切分，每段取 `：:` 后面的值
+    for (const seg of remarks.split(/[;；]/)) {
+      const m = seg.match(/[：:]\s*(.+)/);
+      if (m) {
+        const val = m[1].trim();
+        // 排除银行账号（包含"银行"前缀或纯16位以上数字）
+        if (seg.includes("银行") && /^\d{16,}$/.test(val)) continue;
+        // 纯数字 5-15 位（如订单号、单号）
+        if (/^\d{5,15}$/.test(val)) codes.push(val);
+        // 字母数字组合 6-20 位（如 XSAZDA00117421）
+        else if (/^[A-Za-z0-9]{6,20}$/.test(val)) codes.push(val);
+      }
+    }
+    return codes;
+  }
+
   for (const invoice of invoices) {
     let matched: (typeof receipts)[number] | undefined;
 
-    // 策略1: orderNo 精确匹配
+    // 策略1: orderNo 精确 → 模糊匹配
     if (invoice.orderNo) {
       matched = receipts.find(
         (r) => r.orderNo?.toLowerCase() === invoice.orderNo?.toLowerCase()
@@ -264,10 +304,36 @@ export async function autoMatch(projectId: string) {
       }
     }
 
-    // 策略2: 文件名匹配（去掉扩展名后一致）
+    // 策略2: 发票 orderNo 出现在签收单文件名中
+    if (!matched && invoice.orderNo) {
+      const on = invoice.orderNo.toLowerCase();
+      matched = receipts.find((r) => baseName(r.file.originalName).toLowerCase().includes(on));
+    }
+
+    // 策略3: 发票文件名 = 签收单文件名
     if (!matched) {
       const invBase = baseName(invoice.file.originalName);
       matched = receipts.find((r) => baseName(r.file.originalName) === invBase);
+    }
+
+    // 策略4: 发票文件名包含在签收单文件名中（或反之）
+    if (!matched) {
+      const invBase = baseName(invoice.file.originalName).toLowerCase();
+      matched = receipts.find((r) => {
+        const recvBase = baseName(r.file.originalName).toLowerCase();
+        return recvBase.includes(invBase) || invBase.includes(recvBase);
+      });
+    }
+
+    // 策略5: 从发票备注提取编号 → 匹配签收单文件名
+    if (!matched) {
+      const codes = extractCandidateCodes(invoice);
+      for (const code of codes) {
+        matched = receipts.find((r) =>
+          baseName(r.file.originalName).toLowerCase().includes(code.toLowerCase())
+        );
+        if (matched) break;
+      }
     }
 
     if (matched) {
@@ -275,7 +341,23 @@ export async function autoMatch(projectId: string) {
         where: { invoiceId: invoice.id, receiptId: matched!.id },
       });
       if (!existing) {
-        const matchKey = invoice.orderNo || baseName(invoice.file.originalName);
+        // 判断命中的策略
+        let strategy = "";
+        let matchKey = "";
+        if (invoice.orderNo && matched!.orderNo?.toLowerCase() === invoice.orderNo?.toLowerCase()) {
+          strategy = "订单号精确匹配"; matchKey = invoice.orderNo;
+        } else if (invoice.orderNo && (matched!.orderNo?.toLowerCase().includes(invoice.orderNo.toLowerCase()) || invoice.orderNo.toLowerCase().includes(matched!.orderNo?.toLowerCase() || ""))) {
+          strategy = "订单号模糊匹配"; matchKey = invoice.orderNo;
+        } else if (invoice.orderNo && baseName(matched!.file.originalName).toLowerCase().includes(invoice.orderNo.toLowerCase())) {
+          strategy = "发票订单号↔签收单文件名"; matchKey = invoice.orderNo;
+        } else if (baseName(invoice.file.originalName) === baseName(matched!.file.originalName)) {
+          strategy = "文件名精确匹配"; matchKey = baseName(invoice.file.originalName);
+        } else if (baseName(invoice.file.originalName).toLowerCase().includes(baseName(matched!.file.originalName).toLowerCase()) || baseName(matched!.file.originalName).toLowerCase().includes(baseName(invoice.file.originalName).toLowerCase())) {
+          strategy = "文件名包含匹配"; matchKey = baseName(invoice.file.originalName);
+        } else {
+          strategy = "发票备注编号↔签收单文件名"; matchKey = "备注提取";
+        }
+
         const link = await prisma.invoiceReceiptLink.create({
           data: {
             projectId,
@@ -291,8 +373,9 @@ export async function autoMatch(projectId: string) {
           data: {
             projectId,
             step: "match",
-            action: `自动匹配: 发票 ${invoice.invoiceNo || baseName(invoice.file.originalName)} ↔ 签收单 ${matched!.documentCode || baseName(matched!.file.originalName)}`,
+            action: `[${strategy}] 发票 ${invoice.invoiceNo || baseName(invoice.file.originalName)} ↔ 签收单 ${matched!.documentCode || baseName(matched!.file.originalName)}`,
             inputData: {
+              strategy,
               matchKey,
               invoiceFile: invoice.file.originalName,
               receiptFile: matched!.file.originalName,
@@ -315,50 +398,34 @@ export async function processProject(projectId: string) {
       data: { status: "processing" },
     });
 
-    // 创建待处理记录
-    const invoiceFiles = await prisma.file.findMany({
-      where: { projectId, category: "invoice" },
-    });
-    for (const file of invoiceFiles) {
-      const existing = await prisma.invoice.findFirst({ where: { fileId: file.id } });
-      if (!existing) {
-        await prisma.invoice.create({
-          data: { projectId, fileId: file.id, status: "pending" },
-        });
-      }
-    }
+    // 创建待处理记录（并行）
+    const [invoiceFiles, receiptFiles] = await Promise.all([
+      prisma.file.findMany({ where: { projectId, category: "invoice" } }),
+      prisma.file.findMany({ where: { projectId, category: "receipt" } }),
+    ]);
 
-    const receiptFiles = await prisma.file.findMany({
-      where: { projectId, category: "receipt" },
-    });
-    for (const file of receiptFiles) {
-      const existing = await prisma.receipt.findFirst({ where: { fileId: file.id } });
-      if (!existing) {
-        await prisma.receipt.create({
-          data: { projectId, fileId: file.id, status: "pending" },
-        });
-      }
-    }
+    await Promise.all([
+      ...invoiceFiles.map(async (file) => {
+        const existing = await prisma.invoice.findFirst({ where: { fileId: file.id } });
+        if (!existing) await prisma.invoice.create({ data: { projectId, fileId: file.id, status: "pending" } });
+      }),
+      ...receiptFiles.map(async (file) => {
+        const existing = await prisma.receipt.findFirst({ where: { fileId: file.id } });
+        if (!existing) await prisma.receipt.create({ data: { projectId, fileId: file.id, status: "pending" } });
+      }),
+    ]);
 
-    // 处理发票
+    // 处理发票（并发 4 个）
     const pendingInvoices = await prisma.invoice.findMany({
       where: { projectId, status: "pending" },
     });
-    for (const inv of pendingInvoices) {
-      try {
-        await processInvoice(inv.id);
-      } catch { /* 单个失败不影响整体 */ }
-    }
+    await runWithConcurrency(pendingInvoices, (inv) => processInvoice(inv.id), 2);
 
-    // 处理签收单
+    // 处理签收单（并发 4 个）
     const pendingReceipts = await prisma.receipt.findMany({
       where: { projectId, status: "pending" },
     });
-    for (const rec of pendingReceipts) {
-      try {
-        await processReceipt(rec.id);
-      } catch { /* 单个失败不影响整体 */ }
-    }
+    await runWithConcurrency(pendingReceipts, (rec) => processReceipt(rec.id), 2);
 
     // 自动匹配（外层 try-catch 保护）
     try {

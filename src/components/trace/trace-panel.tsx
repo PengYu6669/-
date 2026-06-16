@@ -120,7 +120,7 @@ export function TracePanel({ type, recordId, open, onClose, highlightField, cell
                 <iframe
                   src={`/api/files/${fileId}`}
                   className="w-full rounded-lg border"
-                  style={{ height: "60vh" }}
+                  style={{ height: "75vh", minHeight: "500px" }}
                   title="PDF 预览"
                 />
               ) : isImage && !imgError ? (

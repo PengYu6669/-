@@ -1,6 +1,5 @@
 /**
  * 火山引擎 TOS 对象存储适配器
- * 文件操作：上传 / 获取签名 URL
  */
 import TOS from "@volcengine/tos-sdk";
 
@@ -17,7 +16,7 @@ const client = new TOS({
   secure: process.env.VOLC_TOS_SECURE !== "false",
 });
 
-/** 上传文件到 TOS */
+/** 上传文件到 TOS，返回完整 key */
 export async function uploadToTOS(
   buffer: Buffer,
   key: string,
@@ -33,30 +32,37 @@ export async function uploadToTOS(
   return fullKey;
 }
 
-/** 生成预签名 URL（默认 1 小时有效） */
-export async function getSignedUrl(key: string, expiresInSec = 3600): Promise<string> {
+/** 生成带 inline 头的预签名 URL（用于 <img>/<iframe> 直接渲染） */
+export async function getSignedUrl(key: string, expiresInSec = 86400): Promise<string> {
   const fullKey = key.startsWith(PREFIX) ? key : PREFIX + key;
   const url = await client.getPreSignedUrl({
     bucket: BUCKET,
     key: fullKey,
     expires: expiresInSec,
     method: "GET",
-  });
+    query: { "response-content-disposition": "inline" },
+  } as any);
   return url;
 }
 
-/** 从 TOS 下载文件内容 */
+/** 从 TOS 下载文件 */
 export async function downloadFromTOS(key: string): Promise<Buffer> {
   const fullKey = key.startsWith(PREFIX) ? key : PREFIX + key;
-  const res = await client.getObject({
-    bucket: BUCKET,
-    key: fullKey,
-  });
-  // res.data 是 ReadableStream 或 Buffer
-  if (Buffer.isBuffer(res.data)) return res.data;
-  const chunks: Buffer[] = [];
-  for await (const chunk of res.data as AsyncIterable<Buffer>) {
-    chunks.push(chunk);
+  try {
+    const res = await client.getObject({
+      bucket: BUCKET,
+      key: fullKey,
+    });
+    // TOS SDK v2: res.content 是 ReadableStream
+    const stream = (res as any).content || (res as any).data;
+    if (Buffer.isBuffer(stream)) return stream;
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) {
+      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+    }
+    return Buffer.concat(chunks);
+  } catch (err: any) {
+    console.error("❌ downloadFromTOS failed:", fullKey, err.message || err);
+    throw err;
   }
-  return Buffer.concat(chunks);
 }
