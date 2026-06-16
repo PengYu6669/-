@@ -36,6 +36,7 @@ yarn-error.log*
 _*.mjs
 _*.ts
 _*.js
+backup_*.sql
 
 # env files
 .env*
