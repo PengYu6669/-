@@ -9,6 +9,9 @@ export async function GET(
 ) {
   const { id } = await params;
 
+  const project = await prisma.project.findUnique({ where: { id }, select: { name: true } });
+  const projectName = project?.name || "发票核对表";
+
   const template = await prisma.template.findFirst({
     where: { projectId: id },
     include: { mappings: { orderBy: { columnIndex: "asc" } } },
@@ -125,7 +128,7 @@ export async function GET(
   return new NextResponse(buffer, {
     headers: {
       "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent("发票核对表.xlsx")}`,
+      "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(projectName + ".xlsx")}`,
     },
   });
 }

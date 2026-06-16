@@ -9,6 +9,7 @@ import {
   recognizeVatInvoice,
   recognizeGeneral,
   recognizeAccurateBasic,
+  recognizePdfMultiPage,
   extractReceiptFieldsFromWords,
   type BaiduVatInvoiceResult,
 } from "@/lib/ocr";
@@ -87,9 +88,44 @@ export async function processInvoice(invoiceId: string) {
       },
     });
 
-    // Step 3: DeepSeek 从备注提取订单号
-    const remarks = (ocrResult.Remarks || "") as string;
-    const { orderNo, raw: llmRaw } = await extractOrderNo(remarks);
+    // Step 3: 从备注提取订单号。VAT 发票 API 可能漏掉末页备注，补 accurate_basic
+    let remarks = (ocrResult.Remarks || "") as string;
+    if (!remarks || remarks.length < 10) {
+      try {
+        const supplement = await recognizePdfMultiPage(base64, fileType);
+        remarks = supplement.wordsText;
+      } catch { /* 忽略 */ }
+    }
+    let orderNo: string | null = null;
+    let llmRaw: unknown = null;
+
+    // 按优先级匹配：订单号 → 合同号 → 采购单号 → 结算单号
+    const reOrderPatterns = [
+      /订单号\s*[\[【]\s*(\S+?)\s*[\]】]/,     // 方括号格式 订单号[xxx]
+      /订单号\s*[：:]\s*(\S+)/,                // 冒号格式 订单号：xxx
+      /合同号\s*[\[【]\s*(\S+?)\s*[\]】]/,
+      /合同号\s*[：:]\s*(\S+)/,
+      /采购单号\s*[\[【]\s*(\S+?)\s*[\]】]/,
+      /采购单号\s*[：:]\s*(\S+)/,
+      /结算单号\s*[\[【]\s*(\S+?)\s*[\]】]/,
+      /结算单号\s*[：:]\s*(\S+)/,
+    ];
+    for (const re of reOrderPatterns) {
+      const m = remarks.match(re);
+      if (m) {
+        const raw = m[1].replace(/[^\w-]/g, "").trim();
+        if (raw.length >= 3) { orderNo = raw; break; }
+      }
+    }
+
+    // 正则没找到再调 LLM
+    if (!orderNo) {
+      const llmResult = await extractOrderNo(remarks);
+      orderNo = llmResult.orderNo;
+      llmRaw = llmResult.raw;
+    } else {
+      llmRaw = { source: "regex", orderNo };
+    }
 
     // 审计：LLM
     await prisma.auditLog.create({
@@ -288,75 +324,72 @@ export async function autoMatch(projectId: string) {
   }
 
   for (const invoice of invoices) {
-    let matched: (typeof receipts)[number] | undefined;
+    let matchedIds: string[] = [];
+    let strategyUsed = "";
 
-    // 策略1: orderNo 精确 → 模糊匹配
+    /**
+     * 尝试一个策略：如果找到匹配则以该策略为准，不再尝试后续策略。
+     * 同一策略内的多个匹配是合理的（如一个订单号关联多张发货单）。
+     */
+    function tryStrategy(name: string, candidates: (typeof receipts)[number][]): boolean {
+      if (matchedIds.length > 0 || candidates.length === 0) return false;
+      matchedIds = candidates.map((r) => r.id);
+      strategyUsed = name;
+      return true;
+    }
+
+    // 策略1: orderNo 精确匹配（可一对多）
     if (invoice.orderNo) {
-      matched = receipts.find(
+      const exact = receipts.filter(
         (r) => r.orderNo?.toLowerCase() === invoice.orderNo?.toLowerCase()
       );
-      if (!matched) {
-        matched = receipts.find(
-          (r) =>
-            r.orderNo?.toLowerCase().includes(invoice.orderNo!.toLowerCase()) ||
-            invoice.orderNo?.toLowerCase().includes(r.orderNo?.toLowerCase() || "")
-        );
+      if (exact.length > 0) {
+        tryStrategy("订单号精确匹配", exact);
       }
     }
 
-    // 策略2: 发票 orderNo 出现在签收单文件名中
-    if (!matched && invoice.orderNo) {
+    // 策略2: orderNo 模糊匹配（互相包含）
+    if (!strategyUsed && invoice.orderNo) {
+      const fuzzy = receipts.filter((r) => {
+        if (!r.orderNo) return false;
+        const ro = r.orderNo.toLowerCase();
+        const io = invoice.orderNo!.toLowerCase();
+        return ro.includes(io) || io.includes(ro);
+      });
+      tryStrategy("订单号模糊匹配", fuzzy);
+    }
+
+    // 策略2.5: 发票 orderNo = 签收单文件名（精确匹配，不需要签收单有 orderNo）
+    if (!strategyUsed && invoice.orderNo && invoice.orderNo.length >= 5) {
       const on = invoice.orderNo.toLowerCase();
-      matched = receipts.find((r) => baseName(r.file.originalName).toLowerCase().includes(on));
+      tryStrategy("订单号↔签收单文件名", receipts.filter((r) =>
+        baseName(r.file.originalName).toLowerCase() === on
+      ));
     }
 
     // 策略3: 发票文件名 = 签收单文件名
-    if (!matched) {
+    if (!strategyUsed) {
       const invBase = baseName(invoice.file.originalName);
-      matched = receipts.find((r) => baseName(r.file.originalName) === invBase);
+      tryStrategy("文件名精确匹配", receipts.filter((r) => baseName(r.file.originalName) === invBase));
     }
 
-    // 策略4: 发票文件名包含在签收单文件名中（或反之）
-    if (!matched) {
-      const invBase = baseName(invoice.file.originalName).toLowerCase();
-      matched = receipts.find((r) => {
-        const recvBase = baseName(r.file.originalName).toLowerCase();
-        return recvBase.includes(invBase) || invBase.includes(recvBase);
-      });
-    }
-
-    // 策略5: 从发票备注提取编号 → 匹配签收单文件名
-    if (!matched) {
+    // 策略4: 发票备注中的编号 = 签收单文件名（只精确匹配）
+    if (!strategyUsed) {
       const codes = extractCandidateCodes(invoice);
       for (const code of codes) {
-        matched = receipts.find((r) =>
-          baseName(r.file.originalName).toLowerCase().includes(code.toLowerCase())
-        );
-        if (matched) break;
+        const found = receipts.filter((r) => baseName(r.file.originalName) === code);
+        if (tryStrategy("备注编号↔文件名精确匹配", found)) break;
       }
     }
 
-    if (matched) {
+    // 为每个匹配到的签收单创建关联
+    for (const receiptId of matchedIds) {
+      const matched = receipts.find((r) => r.id === receiptId)!;
       const existing = await prisma.invoiceReceiptLink.findFirst({
         where: { invoiceId: invoice.id, receiptId: matched!.id },
       });
       if (!existing) {
-        // 判断命中的策略
-        let strategy = "";
-        let matchKey = "";
-        if (invoice.orderNo && matched!.orderNo?.toLowerCase() === invoice.orderNo?.toLowerCase()) {
-          strategy = "订单号精确匹配"; matchKey = invoice.orderNo;
-        } else if (invoice.orderNo && (matched!.orderNo?.toLowerCase().includes(invoice.orderNo.toLowerCase()) || invoice.orderNo.toLowerCase().includes(matched!.orderNo?.toLowerCase() || ""))) {
-          strategy = "订单号模糊匹配"; matchKey = invoice.orderNo;
-        } else if (invoice.orderNo && baseName(matched!.file.originalName).toLowerCase().includes(invoice.orderNo.toLowerCase())) {
-          strategy = "发票订单号↔签收单文件名"; matchKey = invoice.orderNo;
-        } else if (baseName(invoice.file.originalName) === baseName(matched!.file.originalName)) {
-          strategy = "文件名精确匹配"; matchKey = baseName(invoice.file.originalName);
-        } else if (baseName(invoice.file.originalName).toLowerCase().includes(baseName(matched!.file.originalName).toLowerCase()) || baseName(matched!.file.originalName).toLowerCase().includes(baseName(invoice.file.originalName).toLowerCase())) {
-          strategy = "文件名包含匹配"; matchKey = baseName(invoice.file.originalName);
-        } else {
-          strategy = "发票备注编号↔签收单文件名"; matchKey = "备注提取";
-        }
+        const matchKey = invoice.orderNo || baseName(invoice.file.originalName);
 
         const link = await prisma.invoiceReceiptLink.create({
           data: {
@@ -373,9 +406,9 @@ export async function autoMatch(projectId: string) {
           data: {
             projectId,
             step: "match",
-            action: `[${strategy}] 发票 ${invoice.invoiceNo || baseName(invoice.file.originalName)} ↔ 签收单 ${matched!.documentCode || baseName(matched!.file.originalName)}`,
+            action: `[${strategyUsed}] 发票 ${invoice.invoiceNo || baseName(invoice.file.originalName)} ↔ 签收单 ${matched!.documentCode || baseName(matched!.file.originalName)}`,
             inputData: {
-              strategy,
+              strategy: strategyUsed,
               matchKey,
               invoiceFile: invoice.file.originalName,
               receiptFile: matched!.file.originalName,
@@ -391,8 +424,20 @@ export async function autoMatch(projectId: string) {
 }
 
 // ─── 批量处理项目 ───
-export async function processProject(projectId: string) {
+export async function processProject(
+  projectId: string,
+  onProgress?: (p: { step: string; done: number; total: number }) => void,
+  force = false
+) {
   try {
+    // force 模式：重置所有已完成项；卡死自动恢复
+    const prevStatus = await prisma.project.findUnique({ where: { id: projectId }, select: { status: true } });
+    if (force || prevStatus?.status === "processing") {
+      await prisma.invoice.updateMany({ where: { projectId, status: "completed" }, data: { status: "pending" } });
+      await prisma.receipt.updateMany({ where: { projectId, status: "completed" }, data: { status: "pending" } });
+      await prisma.invoiceReceiptLink.deleteMany({ where: { projectId } });
+    }
+
     await prisma.project.update({
       where: { id: projectId },
       data: { status: "processing" },
@@ -415,17 +460,29 @@ export async function processProject(projectId: string) {
       }),
     ]);
 
-    // 处理发票（并发 4 个）
+    // 处理发票（并发 2 个）
     const pendingInvoices = await prisma.invoice.findMany({
       where: { projectId, status: "pending" },
     });
-    await runWithConcurrency(pendingInvoices, (inv) => processInvoice(inv.id), 2);
+    let doneInv = 0;
+    onProgress?.({ step: "识别发票", done: 0, total: pendingInvoices.length });
+    await runWithConcurrency(pendingInvoices, async (inv) => {
+      await processInvoice(inv.id);
+      doneInv++;
+      onProgress?.({ step: "识别发票", done: doneInv, total: pendingInvoices.length });
+    }, 2);
 
-    // 处理签收单（并发 4 个）
+    // 处理签收单（并发 2 个）
     const pendingReceipts = await prisma.receipt.findMany({
       where: { projectId, status: "pending" },
     });
-    await runWithConcurrency(pendingReceipts, (rec) => processReceipt(rec.id), 2);
+    let doneRec = 0;
+    onProgress?.({ step: "识别发货单", done: 0, total: pendingReceipts.length });
+    await runWithConcurrency(pendingReceipts, async (rec) => {
+      await processReceipt(rec.id);
+      doneRec++;
+      onProgress?.({ step: "识别发货单", done: doneRec, total: pendingReceipts.length });
+    }, 2);
 
     // 自动匹配（外层 try-catch 保护）
     try {

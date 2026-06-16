@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { sha256 } from "@/lib/pdf";
 import { uploadToTOS } from "@/lib/storage";
 import crypto from "crypto";
+import JSZip from "jszip";
 
 // POST /api/projects/[id]/upload
 export async function POST(
@@ -37,13 +38,74 @@ export async function POST(
       try {
         const file = entry as File;
         const ext = relativePath.split(".").pop()?.toLowerCase() || "";
-        if (!["pdf", "jpg", "jpeg", "png"].includes(ext)) {
+        if (!["pdf", "jpg", "jpeg", "png", "docx"].includes(ext)) {
           errors.push(`不支持的文件类型: ${relativePath}`);
           continue;
         }
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const buffer = Buffer.from(await (file as any).arrayBuffer());
+
+        // ── .docx 文档：提取嵌入的图片 ──
+        if (ext === "docx") {
+          try {
+            const zip = await JSZip.loadAsync(buffer);
+            const mediaFiles = Object.keys(zip.files).filter((f) =>
+              f.startsWith("word/media/") && !f.endsWith("/")
+            );
+
+            if (mediaFiles.length === 0) {
+              errors.push(`Word 文档中未找到图片: ${relativePath}`);
+            }
+
+            for (const mediaPath of mediaFiles) {
+              const imgData = await zip.files[mediaPath].async("nodebuffer");
+              const imgExt = mediaPath.split(".").pop()?.toLowerCase() || "png";
+              if (!["jpg", "jpeg", "png"].includes(imgExt)) continue;
+
+              const imgHash = sha256(imgData);
+              const imgExisting = await prisma.file.findFirst({
+                where: { projectId: id, hashSha256: imgHash },
+              });
+              if (imgExisting) {
+                errors.push(`文档内图片已存在: ${relativePath}/${mediaPath}`);
+                continue;
+              }
+
+              // 文件名：文档基础名 + 图片序号
+              const docBase = relativePath.replace(/\.docx$/i, "");
+              const imgName = `${docBase}_图${mediaFiles.indexOf(mediaPath) + 1}.${imgExt}`;
+              const storedKey = `projects/${id}/files/${crypto.randomUUID()}.${imgExt}`;
+              const mime = imgExt === "png" ? "image/png" : "image/jpeg";
+              const tosKey = await uploadToTOS(imgData, storedKey, mime);
+
+              // 分类：根据文档路径判断
+              const catFileName = relativePath.toLowerCase().replace(/\\/g, "/");
+              let category = "unknown";
+              if (catFileName.includes("发票")) category = "invoice";
+              else if (catFileName.includes("签收") || catFileName.includes("发货")) category = "receipt";
+
+              const record = await prisma.file.create({
+                data: {
+                  projectId: id,
+                  originalName: imgName,
+                  storedPath: tosKey,
+                  fileType: imgExt === "png" ? "png" : "jpg",
+                  fileSize: imgData.length,
+                  category,
+                  parentDir: relativePath.substring(0, relativePath.lastIndexOf("/") || undefined) || null,
+                  pageCount: 1,
+                  hashSha256: imgHash,
+                },
+              });
+              createdFiles.push({ id: record.id, name: record.originalName });
+            }
+          } catch (zipErr: any) {
+            errors.push(`Word 文档解析失败 ${relativePath}: ${zipErr.message}`);
+          }
+          continue; // docx 本身不存，继续下一个文件
+        }
+
         const hash = sha256(buffer);
 
         // 去重检查

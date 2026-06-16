@@ -129,15 +129,19 @@ export async function recognizeGeneral(
  */
 export async function recognizeAccurateBasic(
   base64: string,
-  fileType: string
-): Promise<{ wordsResult: WordResult[]; wordsText: string; wordsNum: number }> {
+  fileType: string,
+  pdfPageNum?: number
+): Promise<{ wordsResult: WordResult[]; wordsText: string; wordsNum: number; pdfFileSize?: number }> {
   const token = await getAccessToken();
   const raw = stripBase64Prefix(base64);
 
-  const body =
-    fileType === "pdf"
-      ? `pdf_file=${encodeURIComponent(raw)}`
-      : `image=${encodeURIComponent(raw)}`;
+  let body: string;
+  if (fileType === "pdf") {
+    body = `pdf_file=${encodeURIComponent(raw)}`;
+    if (pdfPageNum) body += `&pdf_file_num=${pdfPageNum}`;
+  } else {
+    body = `image=${encodeURIComponent(raw)}`;
+  }
 
   const res = await fetch(`${ACCURATE_BASIC_URL}?access_token=${token}`, {
     method: "POST",
@@ -162,7 +166,28 @@ export async function recognizeAccurateBasic(
     wordsResult,
     wordsText: wordsResult.map((w) => w.words).join("\n"),
     wordsNum: data.words_result_num || wordsResult.length,
+    pdfFileSize: data.pdf_file_size ? Number(data.pdf_file_size) : undefined,
   };
+}
+
+/** PDF 多页 OCR：返回第一页+最后一页合并文本 */
+export async function recognizePdfMultiPage(
+  base64: string,
+  fileType: string
+): Promise<{ wordsText: string; wordsNum: number }> {
+  if (fileType !== "pdf") {
+    const r = await recognizeAccurateBasic(base64, fileType);
+    return { wordsText: r.wordsText, wordsNum: r.wordsNum };
+  }
+  const page1 = await recognizeAccurateBasic(base64, "pdf", 1);
+  let allText = page1.wordsText;
+  const totalPages = page1.pdfFileSize || 1;
+  if (totalPages > 1) {
+    const lastPage = await recognizeAccurateBasic(base64, "pdf", totalPages);
+    allText += "\n" + lastPage.wordsText;
+    return { wordsText: allText, wordsNum: page1.wordsNum + lastPage.wordsNum };
+  }
+  return { wordsText: allText, wordsNum: page1.wordsNum };
 }
 
 /** 字段置信度 */
@@ -188,6 +213,8 @@ export function extractReceiptFieldsFromWords(
 } {
   const allWords = wordsResult.map((w) => w.words);
   const allText = allWords.join("\n");
+  // 用空格拼接，让跨词条的正则也能匹配（关键词和值可能在不同词条）
+  const allTextFlat = allWords.join(" ");
 
   // 整张图 OCR 平均置信度（百度 accurate_basic 词条级 probability）
   const ocrProbs = wordsResult.map((w) => w.probability).filter((p): p is number => p != null);
@@ -208,26 +235,58 @@ export function extractReceiptFieldsFromWords(
   let dateConf: [MatchType, unknown] = ["none", null];
   let recvConf: [MatchType, unknown] = ["none", null];
 
-  // ── 出库单号 ──
+  /** 判断一个纯数字是否像日期（YYYYMMDD / YYMMDD / YYYYMM / YYYY） */
+  function isDateLike(num: string): boolean {
+    if (num.length === 8 && /^20\d{6}$/.test(num)) {
+      // 20241226 → 检查月和日是否合理
+      const m = parseInt(num.slice(4, 6)), d = parseInt(num.slice(6, 8));
+      if (m >= 1 && m <= 12 && d >= 1 && d <= 31) return true;
+    }
+    if (num.length === 6 && /^\d{6}$/.test(num)) {
+      const m = parseInt(num.slice(2, 4)), d = parseInt(num.slice(4, 6));
+      if (m >= 1 && m <= 12 && d >= 1 && d <= 31) return true;
+    }
+    return false;
+  }
+
+  /** 判断候选数字是否合法：非日期、非年份、长度合理 */
+  function isValidCode(num: string): boolean {
+    if (num.length < 5 || num.length > 12) return false; // 至少5位，排除4位年份
+    if (isDateLike(num)) return false;
+    if (num.length === 4 && /^(19|20)\d{2}$/.test(num)) return false; // 年份
+    return true;
+  }
+
+  // ── 出库单号 → 发货单号 → 订单号 → 单据编码 ──
   let documentCode: string | null = null;
-  const exactCodePatterns = [/出库单号\s*[：:]\s*(\S+)/, /发货单号\s*[：:]\s*(\S+)/, /单据号\s*[：:]\s*(\S+)/];
-  const fuzzyCodePatterns = [/出鞋话象\s*[：:]\s*(\S+)/, /发饭各\s*[：:]\s*(\S+)/, /单号\s*[：:]\s*(\S+)/, /编号\s*[：:]\s*(\S+)/, /NO[．.:]\s*(\S+)/i];
+  const exactCodePatterns = [
+    /出库单号\s*[：:]\s*(\S+)/,
+    /发货单号\s*[：:]\s*(\S+)/,
+    /订单号\s*[：:]\s*(\S+)/,
+    /单据编码\s*[：:]\s*(\S+)/,
+    /单据号\s*[：:]\s*(\S+)/,
+  ];
+  const fuzzyCodePatterns = [
+    /出鞋话象\s*[：:]\s*(\S+)/, /发饭各\s*[：:]\s*(\S+)/,
+    /单号\s*[：:]\s*(\S+)/, /编号\s*[：:]\s*(\S+)/,
+    /NO[．.:]\s*(\S+)/i, /编码\s*[：:]\s*(\S+)/,
+  ];
 
   // 先精确匹配
   for (const re of exactCodePatterns) {
-    const m = allText.match(re);
+    let m = allTextFlat.match(re) || allText.match(re);
     if (m) {
       const raw = m[1].replace(/[^\d]/g, "");
-      if (raw.length >= 3) { documentCode = raw; codeConf = ["exact", raw]; break; }
+      if (isValidCode(raw)) { documentCode = raw; codeConf = ["exact", raw]; break; }
     }
   }
   // 模糊匹配
   if (!documentCode) {
     for (const re of fuzzyCodePatterns) {
-      const m = allText.match(re);
+      let m = allTextFlat.match(re) || allText.match(re);
       if (m) {
         const raw = m[1].replace(/[^\d]/g, "");
-        if (raw.length >= 3) { documentCode = raw; codeConf = ["fuzzy", raw]; break; }
+        if (isValidCode(raw)) { documentCode = raw; codeConf = ["fuzzy", raw]; break; }
       }
     }
   }
@@ -236,7 +295,7 @@ export function extractReceiptFieldsFromWords(
     for (let i = 0; i < allWords.length; i++) {
       const w = allWords[i];
       const n = w.replace(/[^\d]/g, "");
-      if (n.length >= 5 && n.length <= 10 && /^\d+$/.test(n)) {
+      if (isValidCode(n) && /^\d+$/.test(n)) {
         const prev = i > 0 ? allWords[i - 1] : "";
         const next = i < allWords.length - 1 ? allWords[i + 1] : "";
         if (!/[¥￥元]/.test(prev) && !/[¥￥元]/.test(next)) {
@@ -251,12 +310,12 @@ export function extractReceiptFieldsFromWords(
   const exactOrderPatterns = [/订单号\s*[：:]\s*(\S+)/, /合同号\s*[：:]\s*(\S+)/];
   const fuzzyOrderPatterns = [/PO[#＃]?\s*[：:]?\s*(\S+)/i, /采购单号\s*[：:]\s*(\S+)/];
   for (const re of exactOrderPatterns) {
-    const m = allText.match(re);
+    let m = allTextFlat.match(re) || allText.match(re);
     if (m && m[1].length >= 3) { orderNo = m[1]; orderConf = ["exact", m[1]]; break; }
   }
   if (!orderNo) {
     for (const re of fuzzyOrderPatterns) {
-      const m = allText.match(re);
+      let m = allTextFlat.match(re) || allText.match(re);
       if (m && m[1].length >= 3) { orderNo = m[1]; orderConf = ["fuzzy", m[1]]; break; }
     }
   }
@@ -266,12 +325,12 @@ export function extractReceiptFieldsFromWords(
   const exactDatePatterns = [/日期\s*[：:]\s*(\d{4}[-/年]\d{1,2}[-/月]\d{1,2}[日]?)/, /发货日期\s*[：:]\s*(\d{4}[-/年]\d{1,2}[-/月]\d{1,2}[日]?)/];
   const fuzzyDatePatterns = [/(\d{4}[-/]\d{1,2}[-/]\d{1,2})/];
   for (const re of exactDatePatterns) {
-    const m = allText.match(re);
+    let m = allTextFlat.match(re) || allText.match(re);
     if (m) { receiptDate = m[1].replace(/[年月]/g, "-").replace(/日$/, ""); dateConf = ["exact", m[1]]; break; }
   }
   if (!receiptDate) {
     for (const re of fuzzyDatePatterns) {
-      const m = allText.match(re);
+      let m = allTextFlat.match(re) || allText.match(re);
       if (m) { receiptDate = m[1]; dateConf = ["fuzzy", m[1]]; break; }
     }
   }
@@ -281,7 +340,7 @@ export function extractReceiptFieldsFromWords(
   const exactRecvPatterns = [/收货单位\s*[：:]\s*(\S+)/, /收货人\s*[：:]\s*(\S+)/, /签收人\s*[：:]\s*(\S+)/, /客户名称\s*[：:]\s*(\S+)/];
   const fuzzyRecvPatterns = [/谢货[^\n]{0,4}\s*[：:]\s*(\S+)/, /发货单位\s*[：:]\s*(\S+)/, /发饭各\s*[：:]\s*(\S+)/];
   for (const re of exactRecvPatterns) {
-    const m = allText.match(re);
+    let m = allTextFlat.match(re) || allText.match(re);
     if (m && m[1].length >= 2 && !/^\d+$/.test(m[1])) {
       recipient = m[1].replace(/[^一-龥a-zA-Z()（）]/g, "").slice(0, 40);
       recvConf = ["exact", recipient]; break;
@@ -289,7 +348,7 @@ export function extractReceiptFieldsFromWords(
   }
   if (!recipient) {
     for (const re of fuzzyRecvPatterns) {
-      const m = allText.match(re);
+      let m = allTextFlat.match(re) || allText.match(re);
       if (m && m[1].length >= 2 && !/^\d+$/.test(m[1])) {
         recipient = m[1].replace(/[^一-龥a-zA-Z()（）]/g, "").slice(0, 40);
         recvConf = ["fuzzy", recipient]; break;

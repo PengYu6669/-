@@ -3,11 +3,13 @@ import { enqueueProcess, getTaskStatus } from "@/lib/queue";
 
 // POST /api/projects/[id]/process — 提交处理任务到后台队列
 export async function POST(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const result = enqueueProcess(id);
+  const body = await req.json().catch(() => ({}));
+  const force = body.force === true;
+  const result = enqueueProcess(id, force);
 
   return NextResponse.json({
     message: result.status === "queued"
@@ -35,5 +37,6 @@ export async function GET(
     status: task.status,
     error: task.error,
     startedAt: task.startedAt,
+    progress: task.progress || null,
   });
 }

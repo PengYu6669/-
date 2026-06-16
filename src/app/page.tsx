@@ -7,8 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { Plus, FolderOpen, FileText, Receipt, ArrowRight, Loader2, MoreVertical, Pencil, Trash2 } from "lucide-react";
+import { Plus, FolderOpen, FileText, Receipt, ArrowRight, Loader2, Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 interface Project {
@@ -36,6 +35,7 @@ export default function HomePage() {
 
   // 删除确认
   const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; projectId: string; name: string } | null>(null);
   const [deleting, setDeleting] = useState(false);
 
   const fetchProjects = async () => {
@@ -157,33 +157,18 @@ export default function HomePage() {
             {projects.map((p) => (
               <Card
                 key={p.id}
-                className="cursor-pointer hover:shadow-md transition-shadow group"
+                className="cursor-pointer hover:shadow-md transition-shadow"
                 onClick={() => router.push(`/project/${p.id}`)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setContextMenu({ x: e.clientX, y: e.clientY, projectId: p.id, name: p.name });
+                }}
               >
                 <CardHeader className="pb-3">
-                  <div className="flex items-start justify-between">
-                    <CardTitle className="text-lg flex-1 truncate mr-2">{p.name}</CardTitle>
-                    <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                  <div className="flex items-start">
+                    <CardTitle className="text-lg truncate w-[70%]" title={p.name}>{p.name}</CardTitle>
+                    <div className="flex items-center gap-1 ml-auto">
                       {statusBadge(p.status)}
-                      <DropdownMenu>
-                        <DropdownMenuTrigger className="h-7 w-7 opacity-0 group-hover:opacity-100 inline-flex items-center justify-center rounded-md hover:bg-muted">
-                          <MoreVertical className="w-4 h-4" />
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuItem onClick={() => {
-                            setRenameId(p.id);
-                            setRenameName(p.name);
-                          }}>
-                            <Pencil className="w-4 h-4 mr-2" />重命名
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            className="text-destructive"
-                            onClick={() => setDeleteId(p.id)}
-                          >
-                            <Trash2 className="w-4 h-4 mr-2" />删除
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
                     </div>
                   </div>
                 </CardHeader>
@@ -245,6 +230,29 @@ export default function HomePage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* 右键菜单 */}
+      {contextMenu && (
+        <div className="fixed inset-0 z-50" onClick={() => setContextMenu(null)} onContextMenu={(e) => { e.preventDefault(); setContextMenu(null); }}>
+          <div
+            className="absolute bg-popover border rounded-lg shadow-lg py-1 min-w-[140px]"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+          >
+            <button
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted text-left"
+              onClick={() => { setRenameId(contextMenu.projectId); setRenameName(contextMenu.name); setContextMenu(null); }}
+            >
+              <Pencil className="w-4 h-4" />重命名
+            </button>
+            <button
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted text-left text-destructive"
+              onClick={() => { setDeleteId(contextMenu.projectId); setContextMenu(null); }}
+            >
+              <Trash2 className="w-4 h-4" />删除
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* 删除确认弹窗 */}
       <Dialog open={!!deleteId} onOpenChange={(v) => { if (!v) setDeleteId(null); }}>

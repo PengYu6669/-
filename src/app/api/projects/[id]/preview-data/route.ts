@@ -61,19 +61,22 @@ export async function GET(
             fileName: inv.invoiceNo || "发票",
           };
         } else if (m.sourceType === "receipt" && m.sourceField) {
-          const receipt = inv.links[0]?.receipt;
-          if (receipt) {
+          const receipts = inv.links.map((l) => l.receipt).filter(Boolean);
+          if (receipts.length > 0) {
             const field = m.sourceField.replace("receipt.", "");
-            value = (receipt as unknown as Record<string, unknown>)[field];
-            if (receipt.receiptDate && field === "receiptDate") {
-              value = new Date(receipt.receiptDate as unknown as string)
-                .toLocaleDateString("zh-CN");
-            }
+            const vals = receipts.map((r) => {
+              let v = (r as unknown as Record<string, unknown>)[field];
+              if (r.receiptDate && field === "receiptDate") {
+                v = new Date(r.receiptDate as unknown as string).toLocaleDateString("zh-CN");
+              }
+              return v != null ? String(v) : "";
+            }).filter((v) => v !== "");
+            value = vals.length > 0 ? [...new Set(vals)].join("、") : null;
             traceSource = {
               type: "receipt",
-              id: receipt.id,
+              id: receipts[0].id,
               field: m.sourceField,
-              fileName: receipt.documentCode || "签收单",
+              fileName: receipts.map((r) => r.documentCode || "").filter(Boolean).join("、") || "签收单",
             };
           }
         } else if (m.sourceType === "static") {
@@ -89,11 +92,12 @@ export async function GET(
         if (m.sourceType === "invoice") {
           confidence = inv.confidence ? Number(inv.confidence) : 0.9;
         } else if (m.sourceType === "receipt") {
-          const receipt = inv.links[0]?.receipt;
-          if (receipt) {
+          const receipts = inv.links.map((l) => l.receipt).filter(Boolean);
+          if (receipts.length > 0) {
             const field = (m.sourceField || "").replace("receipt.", "");
-            const fc = (receipt.rawLlmJson as any)?.fieldConfidence;
-            confidence = fc?.[field] ?? null;
+            // 多签收单取最低置信度
+            const confs = receipts.map((r) => (r.rawLlmJson as any)?.fieldConfidence?.[field]).filter((c) => c != null);
+            confidence = confs.length > 0 ? Math.min(...confs) : null;
           }
         } else {
           confidence = 1;
@@ -152,19 +156,22 @@ export async function GET(
             fileName: inv.invoiceNo || "发票",
           };
         } else if (col.sourceType === "receipt") {
-          const receipt = inv.links[0]?.receipt;
-          if (receipt) {
+          const receipts = inv.links.map((l) => l.receipt).filter(Boolean);
+          if (receipts.length > 0) {
             const field = col.sourceField.replace("receipt.", "");
-            value = (receipt as unknown as Record<string, unknown>)[field];
-            if (receipt.receiptDate && field === "receiptDate") {
-              value = new Date(receipt.receiptDate as unknown as string)
-                .toLocaleDateString("zh-CN");
-            }
+            const vals = receipts.map((r) => {
+              let v = (r as unknown as Record<string, unknown>)[field];
+              if (r.receiptDate && field === "receiptDate") {
+                v = new Date(r.receiptDate as unknown as string).toLocaleDateString("zh-CN");
+              }
+              return v != null ? String(v) : "";
+            }).filter((v) => v !== "");
+            value = vals.length > 0 ? [...new Set(vals)].join("、") : null;
             traceSource = {
               type: "receipt",
-              id: receipt.id,
+              id: receipts[0].id,
               field: col.sourceField,
-              fileName: receipt.documentCode || "签收单",
+              fileName: receipts.map((r) => r.documentCode || "").filter(Boolean).join("、") || "签收单",
             };
           }
         }

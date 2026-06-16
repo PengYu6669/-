@@ -43,6 +43,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const [project, setProject] = useState<ProjectDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState(false);
+  const [progress, setProgress] = useState<{ step: string; done: number; total: number } | null>(null);
   const [activeTab, setActiveTab] = useState("files");
 
   // 模板相关
@@ -79,20 +80,24 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       if (!res.ok) throw new Error("启动失败");
       toast.success("识别处理已启动，正在后台运行...");
 
-      // 轮询项目状态
+      // 轮询项目状态 + 处理进度
       const poll = setInterval(async () => {
         try {
-          const r = await fetch(`/api/projects/${id}`);
-          const p = await r.json();
-          setProject(p);
-          if (p.status === "completed" || p.status === "failed") {
+          const [pr, tr] = await Promise.all([
+            fetch(`/api/projects/${id}`).then((r) => r.json()),
+            fetch(`/api/projects/${id}/process`).then((r) => r.json()),
+          ]);
+          setProject(pr);
+          if (tr.progress) setProgress(tr.progress);
+          if (pr.status === "completed" || pr.status === "failed") {
             clearInterval(poll);
             setProcessing(false);
-            toast.success(p.status === "completed" ? "✅ 识别处理完成！" : "⚠️ 处理完成，部分文件失败");
+            setProgress(null);
+            toast.success(pr.status === "completed" ? "✅ 识别处理完成！" : "⚠️ 处理完成，部分文件失败");
             fetchProject();
           }
         } catch { /* ignore poll errors */ }
-      }, 3000);
+      }, 2000);
 
       // 超时停止轮询
       setTimeout(() => { clearInterval(poll); setProcessing(false); }, 120000);
@@ -136,6 +141,19 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
           <div className="flex-1 flex items-center gap-3">
             <h1 className="text-xl font-bold">{project.name}</h1>
             {statusBadge(project.status)}
+            {progress && (
+              <div className="flex items-center gap-2 ml-4">
+                <div className="w-40 h-2 bg-muted rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-blue-500 transition-all duration-500"
+                    style={{ width: `${progress.total > 0 ? (progress.done / progress.total) * 100 : 0}%` }}
+                  />
+                </div>
+                <span className="text-xs text-muted-foreground whitespace-nowrap">
+                  {progress.step} {progress.done}/{progress.total}
+                </span>
+              </div>
+            )}
           </div>
           <Button variant="outline" size="sm" onClick={fetchProject}>
             <RefreshCw className="w-4 h-4 mr-2" />刷新
@@ -219,6 +237,43 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                     <Play className="w-5 h-5 mr-2" />
                   )}
                   {project.status === "processing" ? "识别处理中..." : "开始 OCR + LLM 识别"}
+                </Button>
+                <Button
+                  onClick={() => {
+                    setProcessing(true);
+                    fetch(`/api/projects/${id}/process`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ force: true }),
+                    }).then(() => {
+                      toast.success("已重置并重新开始识别...");
+                      // 同上轮询
+                      const poll = setInterval(async () => {
+                        try {
+                          const [pr, tr] = await Promise.all([
+                            fetch(`/api/projects/${id}`).then((r) => r.json()),
+                            fetch(`/api/projects/${id}/process`).then((r) => r.json()),
+                          ]);
+                          setProject(pr);
+                          if (tr.progress) setProgress(tr.progress);
+                          if (pr.status === "completed" || pr.status === "failed") {
+                            clearInterval(poll);
+                            setProcessing(false);
+                            setProgress(null);
+                            toast.success(pr.status === "completed" ? "✅ 重新处理完成！" : "⚠️ 处理完成");
+                            fetchProject();
+                          }
+                        } catch { /* ignore */ }
+                      }, 2000);
+                      setTimeout(() => { clearInterval(poll); setProcessing(false); }, 180000);
+                    }).catch(() => toast.error("启动失败"));
+                  }}
+                  disabled={processing || project.status === "processing"}
+                  variant="outline"
+                  size="lg"
+                >
+                  <RefreshCw className="w-4 h-4 mr-2" />
+                  重新处理（重置全部）
                 </Button>
                 <div className="text-sm text-muted-foreground">
                   {project.status === "pending" && "上传文件后点击此处，系统将自动进行OCR识别和字段提取"}
