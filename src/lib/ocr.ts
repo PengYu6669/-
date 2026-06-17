@@ -278,8 +278,8 @@ export function extractReceiptFieldsFromWords(
   for (const re of exactCodePatterns) {
     let m = allTextFlat.match(re) || allText.match(re);
     if (m) {
-      const raw = m[1].replace(/[^\d]/g, "");
-      if (isValidCode(raw)) { documentCode = raw; codeConf = ["exact", raw]; break; }
+      const raw = m[1].replace(/[^A-Za-z0-9\-]/g, ""); // 保留字母+数字
+      if (raw.length >= 4) { documentCode = raw; codeConf = ["exact", raw]; break; }
     }
   }
   // 模糊匹配
@@ -287,8 +287,8 @@ export function extractReceiptFieldsFromWords(
     for (const re of fuzzyCodePatterns) {
       let m = allTextFlat.match(re) || allText.match(re);
       if (m) {
-        const raw = m[1].replace(/[^\d]/g, "");
-        if (isValidCode(raw)) { documentCode = raw; codeConf = ["fuzzy", raw]; break; }
+        const raw = m[1].replace(/[^A-Za-z0-9\-]/g, "");
+        if (raw.length >= 4) { documentCode = raw; codeConf = ["fuzzy", raw]; break; }
       }
     }
   }
