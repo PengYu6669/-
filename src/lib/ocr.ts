@@ -262,10 +262,11 @@ export function extractReceiptFieldsFromWords(
   let documentCode: string | null = null;
   const exactCodePatterns = [
     /出库单号\s*[：:]\s*(\S+)/,
+    /单据编号\s*[：:]\s*(\S+)/,
     /发货单号\s*[：:]\s*(\S+)/,
-    /订单号\s*[：:]\s*([A-Za-z0-9\-]+)/,
-    /单据编码\s*[：:]\s*(\S+)/,
     /单据号\s*[：:]\s*(\S+)/,
+    /单据编码\s*[：:]\s*(\S+)/,
+    /订单号\s*[：:]\s*([A-Za-z0-9\-]+)/,
   ];
   const fuzzyCodePatterns = [
     /出鞋话象\s*[：:]\s*(\S+)/, /发饭各\s*[：:]\s*(\S+)/,
