@@ -208,6 +208,7 @@ export function extractReceiptFieldsFromWords(
   documentCode: string | null;
   orderNo: string | null;
   receiptDate: string | null;
+  amount: string | null;
   recipient: string | null;
   fieldConfidence: FieldConfidence;
 } {
@@ -364,10 +365,23 @@ export function extractReceiptFieldsFromWords(
     }
   }
 
+  // ── 金额 ──
+  let amount: string | null = null;
+  const amountPatterns = [
+    /金额合计\s*[：:]\s*([\d,.]+)/, /合计金额\s*[：:]\s*([\d,.]+)/,
+    /总金额\s*[：:]\s*([\d,.]+)/, /金额\s*[：:]\s*([\d,.]+)/,
+    /价税合计\s*[：:]\s*([\d,.]+)/,
+  ];
+  for (const re of amountPatterns) {
+    let m = allTextFlat.match(re) || allText.match(re);
+    if (m) { amount = m[1].replace(/,/g, ""); break; }
+  }
+
   return {
     documentCode,
     orderNo,
     receiptDate,
+    amount,
     recipient,
     fieldConfidence: {
       documentCode: score(codeConf[0], codeConf[1]),

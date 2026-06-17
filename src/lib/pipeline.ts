@@ -221,6 +221,7 @@ export async function processReceipt(receiptId: string) {
       documentCode,
       orderNo,
       receiptDate,
+      amount,
       recipient,
       fieldConfidence,
     } = extractReceiptFieldsFromWords(ocrResult.wordsResult);
@@ -247,6 +248,7 @@ export async function processReceipt(receiptId: string) {
         documentCode,
         orderNo,
         receiptDate: receiptDate ? parseChineseDate(receiptDate) : null,
+        amount: amount ? parseFloat(amount) : null,
         recipient,
         rawOcrText: ocrResult.wordsText,
         rawLlmJson: sanitizeJson({ documentCode, orderNo, receiptDate, recipient, fieldConfidence }),
@@ -371,6 +373,21 @@ export async function autoMatch(projectId: string) {
     if (!strategyUsed) {
       const invBase = baseName(invoice.file.originalName);
       tryStrategy("文件名精确匹配", receipts.filter((r) => baseName(r.file.originalName) === invBase));
+    }
+
+    // 策略5: 日期 + 金额 匹配（±3天 且 金额相差<1元）
+    if (!strategyUsed && invoice.invoiceDate && invoice.amountInclTax) {
+      const invDate = new Date(invoice.invoiceDate).getTime();
+      const invAmount = Number(invoice.amountInclTax);
+      const candidates = receipts.filter((r) => {
+        if (!r.receiptDate || !r.amount) return false;
+        const recDate = new Date(r.receiptDate).getTime();
+        const recAmount = Number(r.amount);
+        const daysDiff = Math.abs(invDate - recDate) / (1000 * 60 * 60 * 24);
+        const amountDiff = Math.abs(invAmount - recAmount);
+        return daysDiff <= 3 && amountDiff < 1;
+      });
+      tryStrategy("日期+金额匹配", candidates);
     }
 
     // 策略4: 发票备注中的编号 = 签收单文件名（只精确匹配）

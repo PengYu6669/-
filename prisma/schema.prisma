@@ -83,6 +83,7 @@ model Receipt {
   documentCode String?  @map("document_code") @db.VarChar(100)
   orderNo      String?  @map("order_no") @db.VarChar(100)
   receiptDate  DateTime? @map("receipt_date") @db.Date
+  amount       Decimal? @map("amount") @db.Decimal(15, 2)
   recipient    String?  @db.VarChar(100)
   rawOcrText   String?  @map("raw_ocr_text") @db.Text
   rawLlmJson   Json?    @map("raw_llm_json")
