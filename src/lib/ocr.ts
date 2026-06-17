@@ -368,26 +368,45 @@ export function extractReceiptFieldsFromWords(
   // ── 金额 ──
   let amount: string | null = null;
   // 先找合计行
+  // 先找总合计（排除"本页"），再降级到本页合计、金额合计
   const amountPatterns = [
-    /金额合计\s*[：:]\s*([\d,.]+)/, /合计金额\s*[：:]\s*([\d,.]+)/,
-    /总金额\s*[：:]\s*([\d,.]+)/, /金额\s*[：:]\s*([\d,.]+)/,
-    /价税合计\s*[：:]\s*([\d,.]+)/,
+    /(?<!本页)合计金额[（(]?[^)）]*[)）]?\s*[：:]\s*([\d,.]+)/g,
+    /(?<!本页)金额合计[（(]?[^)）]*[)）]?\s*[：:]\s*([\d,.]+)/g,
+    /总金额[（(]?[^)）]*[)）]?\s*[：:]\s*([\d,.]+)/g,
+    /价税合计\s*[：:]\s*([\d,.]+)/g,
+    /本页合计金额[（(]?[^)）]*[)）]?\s*[：:]\s*([\d,.]+)/g,
+    /[（(]?[^)）]*[)）]?\s*合计\s*[：:]\s*([\d,.]+)/g,
   ];
   for (const re of amountPatterns) {
-    let m = allTextFlat.match(re) || allText.match(re);
-    if (m) { amount = m[1].replace(/,/g, ""); break; }
-  }
-  // 没合计行则智能累加：OCR词条中连续两个数字 = 单价+金额，取第二个累加
-  if (!amount) {
-    const amounts: number[] = [];
-    for (let i = 1; i < allWords.length; i++) {
-      const prev = parseFloat(allWords[i - 1]);
-      const curr = parseFloat(allWords[i]);
-      if (!isNaN(prev) && !isNaN(curr) && prev > 0.01 && curr > 0.01 && curr < 500000) {
-        // 确保这两个是紧密的单价-金额对（金额通常 >= 单价/10）
-        if (curr >= prev * 0.1) amounts.push(curr);
-        i++; // 跳过这对，避免重复计数
+    const matches = [...allTextFlat.matchAll(re), ...allText.matchAll(re)];
+    let best: number | null = null;
+    for (const m of matches) {
+      if (m[1] && /^\d/.test(m[1])) {
+        const v = parseFloat(m[1].replace(/,/g, ""));
+        if (!isNaN(v) && (best === null || v > best)) best = v;
       }
+    }
+    if (best !== null) { amount = best.toFixed(2); console.log("[金额] 匹配成功:", amount); break; }
+  }
+  if (!amount) {
+    const idx = allTextFlat.indexOf("合计");
+    console.log("[金额] 未匹配! allTextFlat含'合计'处:", allTextFlat.slice(Math.max(0,idx-10), idx+80));
+    console.log("[金额] allWords总数:", allWords.length, "前10:", allWords.slice(0,10));
+  } else {
+    // 金额提取成功也输出结果
+  }
+  console.log("[字段] 提取结果:", JSON.stringify({documentCode, orderNo, receiptDate, amount, recipient}));
+  // 没合计行则智能累加：收集所有数字，按"单价+金额"模式隔项取金额
+  if (!amount) {
+    const nums: number[] = [];
+    for (const w of allWords) {
+      const n = parseFloat(w);
+      if (!isNaN(n) && n > 0.01 && n < 500000) nums.push(n);
+    }
+    // 数字成对出现：奇数位=单价，偶数位=金额。取所有偶数位（index 1,3,5...）
+    const amounts: number[] = [];
+    for (let i = 1; i < nums.length; i += 2) {
+      if (nums[i] >= nums[i-1] * 0.05) amounts.push(nums[i]);
     }
     if (amounts.length >= 2) {
       const total = amounts.reduce((s, n) => s + Math.round(n * 100) / 100, 0);
