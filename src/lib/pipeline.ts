@@ -375,19 +375,23 @@ export async function autoMatch(projectId: string) {
       tryStrategy("文件名精确匹配", receipts.filter((r) => baseName(r.file.originalName) === invBase));
     }
 
-    // 策略5: 日期 + 金额 匹配（±3天 且 金额相差<1元）
-    if (!strategyUsed && invoice.invoiceDate && invoice.amountInclTax) {
-      const invDate = new Date(invoice.invoiceDate).getTime();
+    // 策略5: 金额精确匹配（日期辅助过滤±180天）
+    if (!strategyUsed && invoice.amountInclTax) {
       const invAmount = Number(invoice.amountInclTax);
       const candidates = receipts.filter((r) => {
-        if (!r.receiptDate || !r.amount) return false;
-        const recDate = new Date(r.receiptDate).getTime();
-        const recAmount = Number(r.amount);
-        const daysDiff = Math.abs(invDate - recDate) / (1000 * 60 * 60 * 24);
-        const amountDiff = Math.abs(invAmount - recAmount);
-        return daysDiff <= 3 && amountDiff < 1;
+        if (!r.amount) return false;
+        const amountDiff = Math.abs(invAmount - Number(r.amount));
+        if (amountDiff >= 0.5) return false;
+        // 如果有日期，辅助过滤（不强制）
+        if (invoice.invoiceDate && r.receiptDate) {
+          const daysDiff = Math.abs(
+            new Date(invoice.invoiceDate).getTime() - new Date(r.receiptDate).getTime()
+          ) / (1000 * 60 * 60 * 24);
+          if (daysDiff > 180) return false;
+        }
+        return true;
       });
-      tryStrategy("日期+金额匹配", candidates);
+      tryStrategy("金额匹配", candidates);
     }
 
     // 策略4: 发票备注中的编号 = 签收单文件名（只精确匹配）

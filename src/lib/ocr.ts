@@ -263,7 +263,7 @@ export function extractReceiptFieldsFromWords(
   const exactCodePatterns = [
     /出库单号\s*[：:]\s*(\S+)/,
     /发货单号\s*[：:]\s*(\S+)/,
-    /订单号\s*[：:]\s*(\S+)/,
+    /订单号\s*[：:]\s*([A-Za-z0-9\-]+)/,
     /单据编码\s*[：:]\s*(\S+)/,
     /单据号\s*[：:]\s*(\S+)/,
   ];
@@ -308,7 +308,7 @@ export function extractReceiptFieldsFromWords(
 
   // ── 订单号 ──
   let orderNo: string | null = null;
-  const exactOrderPatterns = [/订单号\s*[：:]\s*(\S+)/, /合同号\s*[：:]\s*(\S+)/];
+  const exactOrderPatterns = [/订单号\s*[：:]\s*([A-Za-z0-9\-]+)/, /合同号\s*[：:]\s*(\S+)/];
   const fuzzyOrderPatterns = [/PO[#＃]?\s*[：:]?\s*(\S+)/i, /采购单号\s*[：:]\s*(\S+)/];
   for (const re of exactOrderPatterns) {
     let m = allTextFlat.match(re) || allText.match(re);
@@ -367,6 +367,7 @@ export function extractReceiptFieldsFromWords(
 
   // ── 金额 ──
   let amount: string | null = null;
+  // 先找合计行
   const amountPatterns = [
     /金额合计\s*[：:]\s*([\d,.]+)/, /合计金额\s*[：:]\s*([\d,.]+)/,
     /总金额\s*[：:]\s*([\d,.]+)/, /金额\s*[：:]\s*([\d,.]+)/,
@@ -375,6 +376,23 @@ export function extractReceiptFieldsFromWords(
   for (const re of amountPatterns) {
     let m = allTextFlat.match(re) || allText.match(re);
     if (m) { amount = m[1].replace(/,/g, ""); break; }
+  }
+  // 没合计行则智能累加：OCR词条中连续两个数字 = 单价+金额，取第二个累加
+  if (!amount) {
+    const amounts: number[] = [];
+    for (let i = 1; i < allWords.length; i++) {
+      const prev = parseFloat(allWords[i - 1]);
+      const curr = parseFloat(allWords[i]);
+      if (!isNaN(prev) && !isNaN(curr) && prev > 0.01 && curr > 0.01 && curr < 500000) {
+        // 确保这两个是紧密的单价-金额对（金额通常 >= 单价/10）
+        if (curr >= prev * 0.1) amounts.push(curr);
+        i++; // 跳过这对，避免重复计数
+      }
+    }
+    if (amounts.length >= 2) {
+      const total = amounts.reduce((s, n) => s + Math.round(n * 100) / 100, 0);
+      if (total > 10) amount = total.toFixed(2);
+    }
   }
 
   return {
